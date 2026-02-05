@@ -7,9 +7,8 @@
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1))
 #define BLK_HEADER_SIZE (ALIGN(sizeof(struct blk_header)))
 
-void visualize_heap();
-
-static void *heap_start = NULL;
+static struct blk_header *heap_start = NULL;
+static struct blk_header *heap_end = NULL;
 
 struct blk_header {
   size_t size;
@@ -18,7 +17,7 @@ struct blk_header {
   int free;
 };
 
-void split_block(struct blk_header *block, size_t size) {
+static void split_block(struct blk_header *block, size_t size) {
   size_t remaining = block->size - size;
 
   if (remaining > BLK_HEADER_SIZE + ALIGNMENT) {
@@ -32,6 +31,8 @@ void split_block(struct blk_header *block, size_t size) {
 
     if (block->next) {
       block->next->prev = new_block;
+    } else {
+      heap_end = new_block;
     }
 
     block->size = size;
@@ -39,8 +40,9 @@ void split_block(struct blk_header *block, size_t size) {
   }
 }
 
-void *find_fit(size_t size) {
-  struct blk_header *header = (struct blk_header *)heap_start;
+static void *find_fit(size_t size) {
+  struct blk_header *header = heap_start;
+
   while (header != NULL) {
     if (header->free && header->size >= size) {
       if (header->size > size + BLK_HEADER_SIZE + ALIGNMENT) {
@@ -55,7 +57,7 @@ void *find_fit(size_t size) {
   return NULL;
 }
 
-void *my_malloc(size_t size) {
+static void *malloc(size_t size) {
   if (size == 0) {
     return NULL;
   }
@@ -79,15 +81,11 @@ void *my_malloc(size_t size) {
 
     if (!heap_start) {
       heap_start = header;
+      heap_end = header;
     } else {
-      struct blk_header *last = (struct blk_header *)heap_start;
-
-      while (last->next) {
-        last = last->next;
-      }
-
-      last->next = header;
-      header->prev = last;
+      heap_end->next = header;
+      header->prev = heap_end;
+      heap_end = header;
     }
   }
 
@@ -96,7 +94,36 @@ void *my_malloc(size_t size) {
   return (void *)((char *)header + BLK_HEADER_SIZE);
 }
 
-void my_free(void *ptr) {
+static void coalesce(struct blk_header *block) {
+  if (block->next && block->next->free) {
+    block->size += BLK_HEADER_SIZE + block->next->size;
+
+    if (block->next == heap_end) {
+      heap_end = block;
+    }
+
+    block->next = block->next->next;
+
+    if (block->next) {
+      block->next->prev = block;
+    }
+  }
+
+  if (block->prev && block->prev->free) {
+    block->prev->size += BLK_HEADER_SIZE + block->size;
+
+    if (block == heap_end) {
+      heap_end = block->prev;
+    }
+
+    block->prev->next = block->next;
+    if (block->next) {
+      block->next->prev = block->prev;
+    }
+  }
+}
+
+static void free(void *ptr) {
   if (ptr == NULL) {
     return;
   }
@@ -104,76 +131,57 @@ void my_free(void *ptr) {
   struct blk_header *header =
       (struct blk_header *)((char *)ptr - BLK_HEADER_SIZE);
   header->free = 1;
+
+  coalesce(header);
+}
+
+void visualize_heap() {
+  printf("\nHeap: ");
+
+  struct blk_header *h = heap_start;
+
+  while (h) {
+    printf("[%s:%zu] ", h->free ? "F" : "A", h->size);
+
+    if (h->next)
+      printf("-> ");
+
+    h = h->next;
+  }
+
+  printf("\n");
 }
 
 int main() {
   printf("BLK_HEADER_SIZE = %zu bytes\n", BLK_HEADER_SIZE);
   printf("ALIGNMENT = %zu bytes\n\n", ALIGNMENT);
 
-  // Step 1: Allocate a large block
-  printf("1. Allocate 200 bytes:\n");
-  char *a = my_malloc(200);
+  printf("1. Allocate three blocks:\n");
+  char *a = malloc(50);
+  char *b = malloc(30);
+  char *c = malloc(20);
   visualize_heap();
   printf("\n");
 
-  // Step 2: Free it
-  printf("2. Free the 200-byte block:\n");
-  my_free(a);
+  printf("2. Free middle block:\n");
+  free(b);
   visualize_heap();
   printf("\n");
 
-  // Step 3: Allocate small block (should split!)
-  printf("3. Allocate 50 bytes (should split the 200-byte block):\n");
-  char *b = my_malloc(50);
+  printf("3. Free first block (should coalesce with middle):\n");
+  free(a);
   visualize_heap();
   printf("\n");
 
-  // Step 4: Allocate another small block (should reuse free block)
-  printf("4. Allocate 30 bytes (should use the remaining free block):\n");
-  char *c = my_malloc(30);
+  printf("4. Free last block (should coalesce everything):\n");
+  free(c);
   visualize_heap();
   printf("\n");
 
-  // Step 5: Allocate exact fit
-  printf("5. Allocate 20 bytes:\n");
-  char *d = my_malloc(20);
-  visualize_heap();
-  printf("\n");
-
-  // Step 6: Free middle block
-  printf("6. Free the 50-byte block (middle one):\n");
-  my_free(b);
-  visualize_heap();
-  printf("\n");
-
-  // Step 7: Try to allocate exact size (no split)
-  printf("7. Allocate 50 bytes (exact fit, no split):\n");
-  char *e = my_malloc(50);
-  visualize_heap();
-  printf("\n");
-
-  // Step 8: Allocate slightly smaller (no split due to small remainder)
-  printf("8. Free 50-byte block and allocate 45 bytes:\n");
-  my_free(e);
-  visualize_heap();
-  char *f = my_malloc(45);
-  visualize_heap();
-  printf("\n");
-
-  // Step 9: Show final state
-  printf("9. Final heap state:\n");
+  printf("5. Allocate large block (should reuse coalesced space):\n");
+  char *d = malloc(80);
+  (void)d;
   visualize_heap();
 
   return 0;
-}
-void visualize_heap() {
-  printf("\nHeap: ");
-  struct blk_header *h = heap_start;
-  while (h) {
-    printf("[%s:%zu] ", h->free ? "F" : "A", h->size);
-    if (h->next)
-      printf("-> ");
-    h = h->next;
-  }
-  printf("\n");
 }
